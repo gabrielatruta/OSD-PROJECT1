@@ -42,6 +42,7 @@ typedef struct _THREAD
 
     // Currently the thread priority is not used for anything
     THREAD_PRIORITY         Priority;
+    THREAD_PRIORITY RealPriority; /* the real(original) priority *///////////
     THREAD_STATE            State;
 
     // valid only if State == ThreadStateTerminated
@@ -62,6 +63,9 @@ typedef struct _THREAD
 
     // List of the threads in the same process
     LIST_ENTRY              ProcessList;
+
+    LIST_ENTRY AcquiredMutexesList; // the list of mutexes held /////////////////
+    PMUTEX WaitedMutex; // the mutex thread waits for  /////////
 
     // Incremented on each clock tick for the running thread
     QWORD                   TickCountCompleted;

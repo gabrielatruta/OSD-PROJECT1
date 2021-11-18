@@ -28,10 +28,16 @@ void
 MutexAcquire(
     INOUT       PMUTEX      Mutex
     )
+
+    //////// CHANGE STUFF HERE
+    /////// CALL ThreadDonatePriority
 {
     INTR_STATE dummyState;
     INTR_STATE oldState;
     PTHREAD pCurrentThread = GetCurrentThread();
+
+    THREAD_PRIORITY crtThPrio; ////////////
+    THREAD_PRIORITY holderPrio; ///////////
 
     ASSERT( NULL != Mutex);
     ASSERT( NULL != pCurrentThread );
@@ -55,13 +61,21 @@ MutexAcquire(
 
     while (Mutex->Holder != pCurrentThread)
     {
-        //InsertTailList(&Mutex->WaitingList, &pCurrentThread->ReadyList);
-        InsertOrderedList(&Mutex->WaitingList, &pCurrentThread->ReadyList, ThreadComparePriorityReadyList, NULL);
+        InsertTailList(&Mutex->WaitingList, &pCurrentThread->ReadyList);
         ThreadTakeBlockLock();
         LockRelease(&Mutex->MutexLock, dummyState);
+        pCurrentThread->WaitedMutex = Mutex;//////////
         ThreadBlock();
         LockAcquire(&Mutex->MutexLock, &dummyState );
+
+        //crtThPrio = ThreadGetPriority(pCurrentThread); ////////////
+        //holderPrio = ThreadGetPriority(Mutex->Holder); ///////////
+
+        ThreadDonatePriority(pCurrentThread, Mutex->Holder);
+
     }
+
+    InsertHeadList(&pCurrentThread->AcquiredMutexesList, &Mutex->AcquiredMutexListElem); /////
 
     _Analysis_assume_lock_acquired_(*Mutex);
 
@@ -76,6 +90,9 @@ void
 MutexRelease(
     INOUT       PMUTEX      Mutex
     )
+
+    ////////// CHANGE STUFF HERE
+    ////////// CALL ThreadRecomputePriority
 {
     INTR_STATE oldState;
     PLIST_ENTRY pEntry;
@@ -90,6 +107,13 @@ MutexRelease(
     }
 
     pEntry = NULL;
+
+    if (Mutex->Holder->Priority != Mutex->Holder->RealPriority)
+    {
+        Mutex->Holder->Priority = Mutex->Holder->RealPriority;
+    } ///////////////
+
+   // ThreadRecomputePriority(Mutex->Holder);
 
     LockAcquire(&Mutex->MutexLock, &oldState);
 
@@ -107,6 +131,8 @@ MutexRelease(
     {
         Mutex->Holder = NULL;
     }
+
+    RemoveEntryList(&Mutex->Holder->AcquiredMutexesList, &Mutex->AcquiredMutexListElem); ///////////////
 
     _Analysis_assume_lock_released_(*Mutex);
 

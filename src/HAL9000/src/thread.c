@@ -9,10 +9,14 @@
 #include "isr.h"
 #include "gdtmu.h"
 #include "pe_exports.h"
+#include <mutex.h>
 
 #define TID_INCREMENT               4
 
 #define THREAD_TIME_SLICE           1
+
+#define FOR_EACH(item, list) \
+    for (list_node *(item) = (list); (item); (item) = (item)->next)
 
 extern void ThreadStart();
 
@@ -36,9 +40,6 @@ typedef struct _THREAD_SYSTEM_DATA
 
     _Guarded_by_(ReadyThreadsLock)
     LIST_ENTRY          ReadyThreadsList;
-
-    _Guarded_by_(ReadyThreadsLock)
-        THREAD_PRIORITY RunningThreadsMinPriority;
 } THREAD_SYSTEM_DATA, *PTHREAD_SYSTEM_DATA;
 
 static THREAD_SYSTEM_DATA m_threadSystemData;
@@ -450,33 +451,6 @@ ThreadTick(
     }
 }
 
-INT64(__cdecl ThreadComparePriorityReadyList)(
-    IN      PLIST_ENTRY     e1,
-    IN      PLIST_ENTRY     e2,
-    IN_OPT  PVOID           Context
-    )
-{
-    ASSERT(Context != NULL);
-
-    PTHREAD pTh1;
-    pTh1 = CONTAINING_RECORD(e1, THREAD, ReadyList);
-
-    PTHREAD pTh2;
-    pTh2 = CONTAINING_RECORD(e2, THREAD, ReadyList);
-
-    THREAD_PRIORITY prio2 = ThreadGetPriority(pTh2);
-    THREAD_PRIORITY prio1 = ThreadGetPriority(pTh1);
-
-    if (prio2 > prio1)
-        return -1;
-    if (prio2 < prio1)
-        return 1;
-    else return 0;
-}
-
-/*
-change it such that to consider thread priorities;
-*/
 void
 ThreadYield(
     void
@@ -508,8 +482,7 @@ ThreadYield(
     LockAcquire(&m_threadSystemData.ReadyThreadsLock, &dummyState);
     if (pThread != pCpu->ThreadData.IdleThread)
     {
-        //InsertTailList(&m_threadSystemData.ReadyThreadsList, &pThread->ReadyList);
-        InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &pThread->ReadyList, ThreadComparePriorityReadyList, NULL);
+        InsertTailList(&m_threadSystemData.ReadyThreadsList, &pThread->ReadyList);
     }
     if (!bForcedYield)
     {
@@ -549,25 +522,6 @@ ThreadBlock(
     ASSERT( !LockIsOwner(&m_threadSystemData.ReadyThreadsLock));
 }
 
-STATUS
-(_cdecl _ThreadYieldForIpi)(
-    IN_OPT PVOID Context
-)
-{
-    ASSERT(Context != NULL);
-
-    ThreadYield();
-
-    return STATUS_SUCCESS;
-}
-
-
-/*
-change it such that to consider thread priorities; in
-particular when a thread with a higher priority of any other running
-thread is unblock, one of the smaller-priority running threads must be
-preempted;
-*/
 void
 ThreadUnblock(
     IN      PTHREAD              Thread
@@ -583,24 +537,10 @@ ThreadUnblock(
     ASSERT(ThreadStateBlocked == Thread->State);
 
     LockAcquire(&m_threadSystemData.ReadyThreadsLock, &dummyState);
-    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList, ThreadComparePriorityReadyList, NULL);
-    //InsertTailList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList);
+    InsertTailList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList);
     Thread->State = ThreadStateReady;
     LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
     LockRelease(&Thread->BlockLock, oldState);
-
-    //THREAD_PRIORITY new_prio = &Thread->Priority;
-    //THREAD_PRIORITY min_prio = RunningThreadsMinPriority;
-
-    //if (new_prio > min_prio)
-    //{
-    //    _ThreadYieldForIpi(NULL);
-    //}
-    //else
-    //{
-    //    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, Thread, ThreadComparePriorityReadyList, NULL);
-    //}
-       
 }
 
 void
@@ -712,6 +652,9 @@ ThreadGetPriority(
     IN_OPT  PTHREAD             Thread
     )
 {
+
+    /////////// CHANGE STUFF HERE
+
     PTHREAD pThread = (NULL != Thread) ? Thread : GetCurrentThread();
 
     return (NULL != pThread) ? pThread->Priority : 0;
@@ -719,13 +662,53 @@ ThreadGetPriority(
 
 void
 ThreadSetPriority(
-    IN      THREAD_PRIORITY     NewPriority
+    IN      THREAD_PRIORITY     NewPriority,
+    IN THREAD_PRIORITY RealPriority /////////////
     )
 {
+    ////////// CHANGE STUFF HERE
+
     ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
 
     GetCurrentThread()->Priority = NewPriority;
+    GetCurrentThread()->RealPriority = RealPriority; ///////////////
 }
+
+void
+ThreadRecomputePriority(
+    IN PTHREAD thread
+)
+{
+    LIST_ENTRY mutexList = thread->AcquiredMutexesList;
+    thread->RealPriority = thread->Priority;
+    /* to do :( */
+
+    /* foreach (MUTEX mutex in mutexList){
+            foreach(PThread secThread in mutex->waitingList){
+                if (thread->RealPriority < threadGetPriority(secThread)){
+                    thread->RealPriority = secThread->RealPriority;
+                }
+            }
+    }
+    */
+    
+} /////////////////////
+
+void 
+ThreadDonatePriority(
+    IN PTHREAD donating_thread,
+    IN PTHREAD mutex_holder
+)
+{
+    if (ThreadGetPriority(donating_thread) > ThreadGetPriority(mutex_holder)) {
+        mutex_holder->Priority = donating_thread->Priority;
+        while (mutex_holder->WaitedMutex != NULL) {
+            PTHREAD mutex_prop = mutex_holder;
+            mutex_prop->WaitedMutex->Holder->Priority = mutex_prop->Priority;
+            mutex_prop = mutex_prop->WaitedMutex->Holder;
+        }
+    }
+} /////////////////
 
 STATUS
 ThreadExecuteForEachThreadEntry(
@@ -780,6 +763,7 @@ STATUS
 _ThreadInit(
     IN_Z        char*               Name,
     IN          THREAD_PRIORITY     Priority,
+    IN THREAD_PRIORITY RealPriority, ////////////////
     OUT_PTR     PTHREAD*            Thread,
     IN          BOOLEAN             AllocateKernelStack
     )
@@ -804,6 +788,8 @@ _ThreadInit(
 
     __try
     {
+        
+
         pThread = ExAllocatePoolWithTag(PoolAllocateZeroMemory, sizeof(THREAD), HEAP_THREAD_TAG, 0);
         if (NULL == pThread)
         {
@@ -857,7 +843,9 @@ _ThreadInit(
         pThread->Id = _ThreadSystemGetNextTid();
         pThread->State = ThreadStateBlocked;
         pThread->Priority = Priority;
-
+        pThread->RealPriority = RealPriority; /////////
+        pThread->WaitedMutex = NULL; ////////////
+        InitializeListHead(&pThread->AcquiredMutexesList);    ////////////////////
         LockInit(&pThread->BlockLock);
 
         LockAcquire(&m_threadSystemData.AllThreadsLock, &oldIntrState);
