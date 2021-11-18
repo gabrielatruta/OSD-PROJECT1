@@ -2,12 +2,6 @@
 
 #include "thread_defs.h"
 
-INT64(__cdecl ThreadComparePriorityReadyList)(
-    IN      PLIST_ENTRY     e1,
-    IN      PLIST_ENTRY     e2,
-    IN_OPT  PVOID           Context
-    );
-
 //******************************************************************************
 // Function:     ThreadCreate
 // Description:  Spawns a new thread named Name with priority Function which
